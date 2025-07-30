@@ -260,6 +260,10 @@ void DataFileWriterBase::syncIfNeeded()
 
 void DataFileWriterBase::flush()
 {
+    if (!metadata_is_written_) {
+        metadata_is_written_ = true;
+        writeHeader();
+    }
     sync();
 }
 
