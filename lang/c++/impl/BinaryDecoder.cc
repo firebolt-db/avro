@@ -18,6 +18,7 @@
 
 #define __STDC_LIMIT_MACROS
 
+#include <algorithm>
 #include <memory>
 #include "Decoder.hh"
 #include "Zigzag.hh"
@@ -130,13 +131,20 @@ void BinaryDecoder::drain()
     in_.drain(false);
 }
 
+// The length prefix is attacker-controlled for untrusted input. Grow in
+// bounded chunks so a bogus length fails on readBytes()'s EOF instead of
+// eagerly allocating (OOM).
+static const size_t maxDecodeChunk = size_t(1) << 20; // 1 MiB
+
 void BinaryDecoder::decodeString(std::string& value)
 {
     size_t len = doDecodeLength();
-    value.resize(len);
-    if (len > 0) {
-        in_.readBytes(const_cast<uint8_t*>(
-                    reinterpret_cast<const uint8_t*>(value.c_str())), len);
+    value.clear();
+    for (size_t done = 0; done < len; ) {
+        size_t n = std::min(len - done, maxDecodeChunk);
+        value.resize(done + n);
+        in_.readBytes(reinterpret_cast<uint8_t*>(&value[done]), n);
+        done += n;
     }
 }
 
@@ -148,10 +156,14 @@ void BinaryDecoder::skipString()
 
 void BinaryDecoder::decodeBytes(std::vector<uint8_t>& value)
 {
+    // See decodeString(): bounded-chunk growth to avoid OOM on a bogus length.
     size_t len = doDecodeLength();
-    value.resize(len);
-    if (len > 0) {
-        in_.readBytes(value.data(), len);
+    value.clear();
+    for (size_t done = 0; done < len; ) {
+        size_t n = std::min(len - done, maxDecodeChunk);
+        value.resize(done + n);
+        in_.readBytes(value.data() + done, n);
+        done += n;
     }
 }
 
