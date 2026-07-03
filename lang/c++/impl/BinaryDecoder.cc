@@ -18,6 +18,7 @@
 
 #define __STDC_LIMIT_MACROS
 
+#include <algorithm>
 #include <memory>
 #include "Decoder.hh"
 #include "Zigzag.hh"
@@ -130,13 +131,25 @@ void BinaryDecoder::drain()
     in_.drain(false);
 }
 
+// A length-prefixed string/bytes value cannot be longer than the bytes that
+// actually follow it in the stream, but the length prefix is attacker
+// controlled (Avro data — e.g. Iceberg manifests — is untrusted). Resizing the
+// destination to `len` in one call lets a bogus multi-GiB length trigger a huge
+// allocation (OOM) before we ever read a byte and discover the stream is far
+// shorter. Grow the destination in bounded chunks instead: a bogus length then
+// fails on the "EOF reached" thrown by readBytes() after only a bounded
+// allocation, and well-formed values still read in full.
+static const size_t maxDecodeChunk = size_t(1) << 20; // 1 MiB
+
 void BinaryDecoder::decodeString(std::string& value)
 {
     size_t len = doDecodeLength();
-    value.resize(len);
-    if (len > 0) {
-        in_.readBytes(const_cast<uint8_t*>(
-                    reinterpret_cast<const uint8_t*>(value.c_str())), len);
+    value.clear();
+    for (size_t done = 0; done < len; ) {
+        size_t n = std::min(len - done, maxDecodeChunk);
+        value.resize(done + n);
+        in_.readBytes(reinterpret_cast<uint8_t*>(&value[done]), n);
+        done += n;
     }
 }
 
@@ -148,10 +161,15 @@ void BinaryDecoder::skipString()
 
 void BinaryDecoder::decodeBytes(std::vector<uint8_t>& value)
 {
+    // See decodeString(): grow in bounded chunks so an attacker-controlled
+    // length can't drive a huge allocation before hitting the stream's EOF.
     size_t len = doDecodeLength();
-    value.resize(len);
-    if (len > 0) {
-        in_.readBytes(value.data(), len);
+    value.clear();
+    for (size_t done = 0; done < len; ) {
+        size_t n = std::min(len - done, maxDecodeChunk);
+        value.resize(done + n);
+        in_.readBytes(value.data() + done, n);
+        done += n;
     }
 }
 
