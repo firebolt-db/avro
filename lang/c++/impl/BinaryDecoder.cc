@@ -18,6 +18,7 @@
 
 #define __STDC_LIMIT_MACROS
 
+#include <algorithm>
 #include <memory>
 #include "Decoder.hh"
 #include "Zigzag.hh"
@@ -130,13 +131,25 @@ void BinaryDecoder::drain()
     in_.drain(false);
 }
 
+// The length prefix is attacker-controlled for untrusted input, so we cannot
+// resize eagerly to the full claimed length (a bogus multi-GiB value would
+// OOM before a single byte is read). Instead grow geometrically: allocate a
+// small initial chunk, then double each round until we reach the real length.
+// A bogus length fails on readBytes()'s EOF once we outrun the actual stream,
+// having allocated at most ~2x the bytes that were really there. Doubling also
+// keeps a legitimate large value at O(log len) reallocations / O(len) total
+// copying, rather than the quadratic cost of fixed-size chunks.
+static const size_t initialDecodeChunk = size_t(1) << 20; // 1 MiB
+
 void BinaryDecoder::decodeString(std::string& value)
 {
     size_t len = doDecodeLength();
-    value.resize(len);
-    if (len > 0) {
-        in_.readBytes(const_cast<uint8_t*>(
-                    reinterpret_cast<const uint8_t*>(value.c_str())), len);
+    value.clear();
+    for (size_t done = 0; done < len; ) {
+        size_t target = std::min(len, done ? done * 2 : initialDecodeChunk);
+        value.resize(target);
+        in_.readBytes(reinterpret_cast<uint8_t*>(&value[done]), target - done);
+        done = target;
     }
 }
 
@@ -148,10 +161,14 @@ void BinaryDecoder::skipString()
 
 void BinaryDecoder::decodeBytes(std::vector<uint8_t>& value)
 {
+    // See decodeString(): geometric growth to avoid OOM on a bogus length.
     size_t len = doDecodeLength();
-    value.resize(len);
-    if (len > 0) {
-        in_.readBytes(value.data(), len);
+    value.clear();
+    for (size_t done = 0; done < len; ) {
+        size_t target = std::min(len, done ? done * 2 : initialDecodeChunk);
+        value.resize(target);
+        in_.readBytes(value.data() + done, target - done);
+        done = target;
     }
 }
 
