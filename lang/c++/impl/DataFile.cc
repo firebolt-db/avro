@@ -31,6 +31,7 @@
 
 #ifdef SNAPPY_CODEC_AVAILABLE
 #include <snappy.h>
+#include <snappy-sinksource.h>
 #endif
 
 namespace avro {
@@ -52,6 +53,31 @@ const string AVRO_ZSTD_CODEC("zstandard");
 
 #ifdef SNAPPY_CODEC_AVAILABLE
 const string AVRO_SNAPPY_CODEC = "snappy";
+
+// A snappy Sink that appends decompressed bytes into a std::string. It
+// overrides only Append() and leaves GetAppendBufferVariable() at the base
+// default (hands back only the tiny scratch buffer), so
+// snappy::Uncompress(Source*, Sink*) sees a scratch smaller than the declared
+// uncompressed length and takes its block-by-block scattered path instead of
+// pre-sizing one buffer to the full declared length. The destination then grows
+// as bytes are actually decompressed -- snappy hands over each block via
+// Append() and the std::string grows with its usual amortized (doubling)
+// strategy -- driven by the real output rather than the untrusted length prefix.
+// That is what prevents the OOM: the std::string overload of snappy::Uncompress
+// resize()s the destination to the full declared length up front, so a tiny
+// crafted block claiming multi-GiB blows up before a byte is read; growing as
+// bytes arrive instead means a bogus length simply fails once the compressed
+// input is exhausted, having allocated only on the order of what was really
+// produced -- the same bounded-growth strategy as the BinaryDecoder
+// length-prefix fix.
+class SnappyStringSink : public snappy::Sink {
+public:
+    explicit SnappyStringSink(std::string& dest) : dest_(dest) {}
+    void Append(const char* bytes, size_t n) override { dest_.append(bytes, n); }
+
+private:
+    std::string& dest_;
+};
 #endif
 
 const size_t minSyncInterval = 32;
@@ -471,8 +497,44 @@ void DataFileReaderBase::readDataBlock()
         int b4 = compressed_[len - 1] & 0xFF;
 
         checksum = (b1 << 24) + (b2 << 16) + (b3 << 8) + (b4);
-        if (!snappy::Uncompress(reinterpret_cast<const char*>(compressed_.data()),
-                len - 4, &uncompressed)) {
+
+        // The block's declared uncompressed length is a varint prefix and is
+        // attacker-controlled for untrusted input. The std::string overload of
+        // snappy::Uncompress resize()s the destination to that full length before
+        // decompressing a single byte, so a tiny crafted block claiming multi-GiB
+        // drives a huge allocation up front -- a decompression bomb -> OOM.
+        //
+        // Read the declared length without allocating (GetUncompressedLength) and
+        // pick a strategy from it -- this never rejects any block:
+        //  - modest length: decompress in one shot into a pre-sized buffer, the
+        //    fast path with no extra copy (the overwhelmingly common case);
+        //  - implausibly large length: decompress through SnappyStringSink,
+        //    whose scattered path grows the destination as bytes are produced
+        //    (never pre-sizing to the declared length), so a bogus length aborts
+        //    once the compressed input is exhausted -- having allocated only on
+        //    the order of what was really produced -- while a genuinely large
+        //    block still decodes, just incrementally.
+        // maxFlatSnappyDecode bounds the worst-case up-front allocation a crafted
+        // block can force onto the fast path; it comfortably exceeds real Avro
+        // block sizes, so legitimate data keeps the fast path.
+        uncompressed.clear();
+        const size_t maxFlatSnappyDecode = size_t(64) << 20; // 64 MiB
+        size_t uncompressedLen = 0;
+        bool decoded;
+        if (snappy::GetUncompressedLength(
+                    reinterpret_cast<const char*>(compressed_.data()), len - 4,
+                    &uncompressedLen) &&
+                uncompressedLen <= maxFlatSnappyDecode) {
+            decoded = snappy::Uncompress(
+                    reinterpret_cast<const char*>(compressed_.data()), len - 4,
+                    &uncompressed);
+        } else {
+            SnappyStringSink snappySink(uncompressed);
+            snappy::ByteArraySource snappySource(
+                    reinterpret_cast<const char*>(compressed_.data()), len - 4);
+            decoded = snappy::Uncompress(&snappySource, &snappySink);
+        }
+        if (!decoded) {
             throw Exception(
                     "Snappy Compression reported an error when decompressing");
         }
