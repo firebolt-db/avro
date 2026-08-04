@@ -44,8 +44,22 @@ const char* typeToString(EntityType t)
     }
 }
 
+// Bound JSON nesting: readEntity recurses once per array/object level, so a
+// deeply nested document (e.g. a malicious Avro writer schema or default value)
+// would overflow the native stack while building the DOM — before the schema
+// compiler's own depth check runs. 256 is far above any legitimate Avro JSON
+// and stays safe on the query pipeline's worker-thread stacks.
+static const size_t kMaxJsonDepth = 256;
+
 Entity readEntity(JsonParser& p)
 {
+    static thread_local size_t depth = 0;
+    if (++depth > kMaxJsonDepth) {
+        --depth;
+        throw Exception(boost::format("JSON nesting depth exceeds maximum (%1%)") % kMaxJsonDepth);
+    }
+    struct DepthGuard { size_t& d; ~DepthGuard() { --d; } } guard{depth};
+
     switch (p.peek()) {
     case JsonParser::tkNull:
         p.advance();

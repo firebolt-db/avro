@@ -180,9 +180,15 @@ void BinaryDecoder::skipBytes()
 
 void BinaryDecoder::decodeFixed(size_t n, std::vector<uint8_t>& value)
 {
-    value.resize(n);
-    if (n > 0) {
-        in_.readBytes(value.data(), n);
+    // See decodeString(): geometric growth so a schema declaring a huge fixed
+    // size cannot drive a multi-GiB allocation before the short stream is
+    // exhausted (a bogus size fails on readBytes()'s EOF instead of pre-sizing).
+    value.clear();
+    for (size_t done = 0; done < n; ) {
+        size_t target = std::min(n, done ? done * 2 : initialDecodeChunk);
+        value.resize(target);
+        in_.readBytes(value.data() + done, target - done);
+        done = target;
     }
 }
 
