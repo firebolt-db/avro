@@ -520,8 +520,23 @@ static NodePtr makeNode(const Entity& e, const Array& m,
     return NodePtr(new NodeUnion(mm));
 }
 
+// Bound schema nesting: makeNode recurses once per level (array/map/record/
+// union), so a maliciously deep writer schema would overflow the native stack
+// during compilation. 256 is far above any legitimate Avro schema and stays
+// safe on the query pipeline's worker-thread stacks. Every nesting level passes
+// through this makeNode() overload, so guarding it here also bounds the
+// datum-decode recursion, which follows the schema tree.
+static const size_t kMaxSchemaDepth = 256;
+
 static NodePtr makeNode(const json::Entity& e, SymbolTable& st, const string& ns)
 {
+    static thread_local size_t depth = 0;
+    if (++depth > kMaxSchemaDepth) {
+        --depth;
+        throw Exception(boost::format("Avro schema nesting depth exceeds maximum (%1%)") % kMaxSchemaDepth);
+    }
+    struct DepthGuard { size_t& d; ~DepthGuard() { --d; } } guard{depth};
+
     switch (e.type()) {
     case json::etString:
         return makeNode(e.stringValue(), st, ns);
