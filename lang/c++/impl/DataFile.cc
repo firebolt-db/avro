@@ -454,6 +454,16 @@ void DataFileReaderBase::readDataBlock()
     avro::decode(*decoder_, objectCount_);
     int64_t byteCount;
     avro::decode(*decoder_, byteCount);
+    // Both are zigzag varints, so corrupt input decodes them negative. A
+    // negative objectCount_ never converges: hasMore() waits for 0 and decr()
+    // only decrements. A negative byteCount becomes a huge size_t bound in
+    // boundedInputStream() below. objectCount_ > byteCount is legal (zero-byte
+    // rows), so it is not rejected.
+    if (objectCount_ < 0 || byteCount < 0) {
+        throw Exception(boost::format(
+            "Invalid data block header: objectCount %1%, byteCount %2%")
+            % objectCount_ % byteCount);
+    }
     decoder_->init(*stream_);
     blockEnd_ = stream_->byteCount() + byteCount;
 
