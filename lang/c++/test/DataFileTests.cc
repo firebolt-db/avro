@@ -760,6 +760,73 @@ void testSkipStringSnappyCodec()
 }
 #endif
 
+// Corrupt OCF block headers. A negative objectCount never converges (hasMore()
+// waits for 0, decr() only decrements); a negative byteCount becomes a huge
+// size_t bound in boundedInputStream(). These drive readDataBlock() via init(),
+// so a missing guard asserts rather than hangs.
+
+static void encodeZigzagVarint(std::vector<uint8_t> &out, int64_t value) {
+    uint64_t n = (static_cast<uint64_t>(value) << 1) ^
+                 static_cast<uint64_t>(value >> 63);
+    do {
+        uint8_t b = n & 0x7f;
+        n >>= 7;
+        if (n != 0) {
+            b |= 0x80;
+        }
+        out.push_back(b);
+    } while (n != 0);
+}
+
+static void appendAvroBytes(std::vector<uint8_t> &out, const std::string &s) {
+    encodeZigzagVarint(out, static_cast<int64_t>(s.size()));
+    out.insert(out.end(), s.begin(), s.end());
+}
+
+// Empty-record schema on purpose: a row consumes no bytes, so exhausting the
+// block cannot end the read.
+static std::vector<uint8_t> makeOcfWithBlockHeader(int64_t objectCount,
+                                                   int64_t byteCount) {
+    const std::string schema =
+        "{\"type\":\"record\",\"name\":\"R\",\"fields\":[]}";
+    std::vector<uint8_t> out{'O', 'b', 'j', 1};
+    encodeZigzagVarint(out, 2); // metadata map: 2 entries
+    appendAvroBytes(out, "avro.schema");
+    appendAvroBytes(out, schema);
+    appendAvroBytes(out, "avro.codec");
+    appendAvroBytes(out, "null");
+    encodeZigzagVarint(out, 0);   // end of map
+    out.insert(out.end(), 16, 0); // sync marker
+    encodeZigzagVarint(out, objectCount);
+    encodeZigzagVarint(out, byteCount);
+    out.insert(out.end(), 16, 0); // trailing sync
+    return out;
+}
+
+static void readBlockHeader(int64_t objectCount, int64_t byteCount) {
+    const std::vector<uint8_t> ocf =
+        makeOcfWithBlockHeader(objectCount, byteCount);
+    avro::DataFileReaderBase reader(
+        avro::memoryInputStream(ocf.data(), ocf.size()));
+    reader.init(); // readDataBlock() runs here, not in the constructor
+}
+
+void testRejectsNegativeObjectCount() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    BOOST_CHECK_THROW(readBlockHeader(-42, 0), avro::Exception);
+}
+
+void testRejectsNegativeByteCount() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    BOOST_CHECK_THROW(readBlockHeader(1, -1), avro::Exception);
+}
+
+// Legitimate: zero-byte rows let a block hold many objects in few bytes.
+void testAcceptsMoreObjectsThanBytes() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    BOOST_CHECK_NO_THROW(readBlockHeader(4, 0));
+}
+
 test_suite*
 init_unit_test_suite(int argc, char *argv[])
 {
@@ -883,6 +950,12 @@ init_unit_test_suite(int argc, char *argv[])
         ts->add(BOOST_CLASS_TEST_CASE(&DataFileTest::testCleanup, t));
         boost::unit_test::framework::master_test_suite().add(ts);
     }
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testRejectsNegativeObjectCount));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testRejectsNegativeByteCount));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testAcceptsMoreObjectsThanBytes));
     boost::unit_test::framework::master_test_suite().
         add(BOOST_TEST_CASE(&testSkipStringNullCodec));
     boost::unit_test::framework::master_test_suite().
