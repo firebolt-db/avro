@@ -440,6 +440,34 @@ unique_ptr<InputStream> boundedInputStream(InputStream& in, size_t limit)
     return unique_ptr<InputStream>(new BoundedInputStream(in, limit));
 }
 
+// The most objects a file whose objects are all zero bytes wide may declare. Such an object
+// consumes no input, so a block header can declare any number of them in a few bytes and a
+// reader would spin for as long as the count lasts. Like apache-avro (Rust), which bounds such
+// a count by its allocation budget, cap it rather than trust the header.
+static const int64_t maxZeroWidthObjects = int64_t(1) << 24;
+
+// Whether every value of `node` encodes to zero bytes: null, a zero-size fixed, and records
+// made only of those. Every other type writes at least a length, tag or value byte. A named
+// reference is not followed and counts as non-empty, which only forgoes the cap.
+static bool isZeroWidth(const NodePtr& node)
+{
+    switch (node->type()) {
+    case AVRO_NULL:
+        return true;
+    case AVRO_FIXED:
+        return node->fixedSize() == 0;
+    case AVRO_RECORD:
+        for (size_t i = 0; i < node->leaves(); ++i) {
+            if (! isZeroWidth(node->leafAt(static_cast<int>(i)))) {
+                return false;
+            }
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+
 void DataFileReaderBase::readDataBlock()
 {
     decoder_->init(*stream_);
@@ -463,6 +491,14 @@ void DataFileReaderBase::readDataBlock()
         throw Exception(boost::format(
             "Invalid data block header: objectCount %1%, byteCount %2%")
             % objectCount_ % byteCount);
+    }
+    if (zeroWidthObjects_) {
+        if (objectCount_ > maxZeroWidthObjects - zeroWidthObjectCount_) {
+            throw Exception(boost::format(
+                "Invalid data block header: objectCount %1% takes the file past %2% "
+                "zero-byte objects") % objectCount_ % maxZeroWidthObjects);
+        }
+        zeroWidthObjectCount_ += objectCount_;
     }
     decoder_->init(*stream_);
     blockEnd_ = stream_->byteCount() + byteCount;
@@ -617,6 +653,7 @@ void DataFileReaderBase::readHeader()
     }
 
     dataSchema_ = makeSchema(it->second);
+    zeroWidthObjects_ = isZeroWidth(dataSchema_.root());
     if (! readerSchema_.root()) {
         readerSchema_ = dataSchema();
     }
