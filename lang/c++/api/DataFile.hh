@@ -194,6 +194,8 @@ class AVRO_DECL DataFileReaderBase : boost::noncopyable {
     Codec codec_;
     int64_t blockStart_;
     int64_t blockEnd_;
+    size_t minRowBytes_ = 0;
+    int64_t zeroWidthRowsLeft_ = 0;
 
     ValidSchema readerSchema_;
     ValidSchema dataSchema_;
@@ -262,6 +264,11 @@ public:
      * Returns the schema stored with the data file.
      */
     const ValidSchema& dataSchema() { return dataSchema_; }
+
+    /**
+     * Returns the fewest bytes a row of the data schema encodes to.
+     */
+    size_t minRowBytes() const { return minRowBytes_; }
 
     /**
      * Closes the reader. No further operation is possible on this reader.

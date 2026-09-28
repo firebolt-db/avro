@@ -19,7 +19,11 @@
 #include "DataFile.hh"
 #include "Compiler.hh"
 #include "Exception.hh"
+#include "NodeImpl.hh"
 
+#include <algorithm>
+#include <cstdint>
+#include <map>
 #include <sstream>
 
 #include <boost/random/mersenne_twister.hpp>
@@ -45,6 +49,8 @@ using std::string;
 using std::array;
 
 namespace {
+const int64_t maxZeroWidthRows = 1 << 20;
+
 const string AVRO_SCHEMA_KEY("avro.schema");
 const string AVRO_CODEC_KEY("avro.codec");
 const string AVRO_NULL_CODEC("null");
@@ -464,6 +470,14 @@ void DataFileReaderBase::readDataBlock()
             "Invalid data block header: objectCount %1%, byteCount %2%")
             % objectCount_ % byteCount);
     }
+    if (minRowBytes_ == 0) {
+        if (objectCount_ > zeroWidthRowsLeft_) {
+            throw Exception(boost::format(
+                "Data file declares more than %1% rows of a schema that "
+                "encodes to zero bytes") % maxZeroWidthRows);
+        }
+        zeroWidthRowsLeft_ -= objectCount_;
+    }
     decoder_->init(*stream_);
     blockEnd_ = stream_->byteCount() + byteCount;
 
@@ -601,6 +615,65 @@ static ValidSchema makeSchema(const vector<uint8_t>& v)
     return ValidSchema(vs);
 }
 
+static size_t saturatingAdd(size_t a, size_t b)
+{
+    return a > SIZE_MAX - b ? SIZE_MAX : a + b;
+}
+
+// An in-progress node counts as zero to keep recursive schemas bounded.
+static size_t minEncodedSize(const NodePtr& node,
+                             std::map<const Node*, size_t>& memo)
+{
+    auto it = memo.find(node.get());
+    if (it != memo.end()) {
+        return it->second;
+    }
+    memo[node.get()] = 0;
+    size_t size = 0;
+    switch (node->type()) {
+    case AVRO_BOOL:
+    case AVRO_INT:
+    case AVRO_LONG:
+    case AVRO_ENUM:
+    case AVRO_STRING:
+    case AVRO_BYTES:
+    case AVRO_ARRAY:
+    case AVRO_MAP:
+        size = 1;
+        break;
+    case AVRO_FLOAT:
+        size = 4;
+        break;
+    case AVRO_DOUBLE:
+        size = 8;
+        break;
+    case AVRO_FIXED:
+        size = static_cast<size_t>(node->fixedSize());
+        break;
+    case AVRO_RECORD:
+        for (size_t i = 0; i < node->leaves(); ++i) {
+            size = saturatingAdd(size, minEncodedSize(node->leafAt(i), memo));
+        }
+        break;
+    case AVRO_UNION: {
+        size_t branch = node->leaves() == 0 ? 0 : SIZE_MAX;
+        for (size_t i = 0; i < node->leaves(); ++i) {
+            branch = std::min(branch, minEncodedSize(node->leafAt(i), memo));
+        }
+        size = saturatingAdd(1, branch);
+        break;
+    }
+    case AVRO_SYMBOLIC:
+        size = minEncodedSize(
+            static_cast<const NodeSymbolic&>(*node).getNode(), memo);
+        break;
+    default:
+        break;
+    }
+    memo[node.get()] = size;
+    return size;
+}
+
 void DataFileReaderBase::readHeader()
 {
     decoder_->init(*stream_);
@@ -617,6 +690,9 @@ void DataFileReaderBase::readHeader()
     }
 
     dataSchema_ = makeSchema(it->second);
+    std::map<const Node*, size_t> memo;
+    minRowBytes_ = minEncodedSize(dataSchema_.root(), memo);
+    zeroWidthRowsLeft_ = maxZeroWidthRows;
     if (! readerSchema_.root()) {
         readerSchema_ = dataSchema();
     }
