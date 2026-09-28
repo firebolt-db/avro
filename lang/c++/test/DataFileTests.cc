@@ -23,6 +23,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/shared_ptr.hpp>
 
+#include <fstream>
 #include <thread>
 #include <chrono>
 
@@ -783,12 +784,14 @@ static void appendAvroBytes(std::vector<uint8_t> &out, const std::string &s) {
     out.insert(out.end(), s.begin(), s.end());
 }
 
-// Empty-record schema on purpose: a row consumes no bytes, so exhausting the
-// block cannot end the read.
-static std::vector<uint8_t> makeOcfWithBlockHeader(int64_t objectCount,
-                                                   int64_t byteCount) {
-    const std::string schema =
-        "{\"type\":\"record\",\"name\":\"R\",\"fields\":[]}";
+static const std::string emptyRecordSchema =
+    "{\"type\":\"record\",\"name\":\"R\",\"fields\":[]}";
+
+// An object-container file with `schema` and one empty-bodied block per
+// (objectCount, byteCount) header.
+static std::vector<uint8_t> makeOcfWithBlockHeaders(
+    const std::string &schema,
+    const std::vector<std::pair<int64_t, int64_t>> &blocks) {
     std::vector<uint8_t> out{'O', 'b', 'j', 1};
     encodeZigzagVarint(out, 2); // metadata map: 2 entries
     appendAvroBytes(out, "avro.schema");
@@ -797,10 +800,19 @@ static std::vector<uint8_t> makeOcfWithBlockHeader(int64_t objectCount,
     appendAvroBytes(out, "null");
     encodeZigzagVarint(out, 0);   // end of map
     out.insert(out.end(), 16, 0); // sync marker
-    encodeZigzagVarint(out, objectCount);
-    encodeZigzagVarint(out, byteCount);
-    out.insert(out.end(), 16, 0); // trailing sync
+    for (const auto &block : blocks) {
+        encodeZigzagVarint(out, block.first);
+        encodeZigzagVarint(out, block.second);
+        out.insert(out.end(), 16, 0); // trailing sync
+    }
     return out;
+}
+
+// Empty-record schema on purpose: a row consumes no bytes, so exhausting the
+// block cannot end the read.
+static std::vector<uint8_t> makeOcfWithBlockHeader(int64_t objectCount,
+                                                   int64_t byteCount) {
+    return makeOcfWithBlockHeaders(emptyRecordSchema, {{objectCount, byteCount}});
 }
 
 static void readBlockHeader(int64_t objectCount, int64_t byteCount) {
@@ -825,6 +837,110 @@ void testRejectsNegativeByteCount() {
 void testAcceptsMoreObjectsThanBytes() {
     BOOST_TEST_CHECKPOINT(__func__);
     BOOST_CHECK_NO_THROW(readBlockHeader(4, 0));
+}
+
+// Zero-byte objects consume no input, so a file of them may declare at most
+// 2^24; past that a header could keep a reader spinning for 2^63 objects.
+static const int64_t maxZeroWidthObjects = int64_t(1) << 24;
+
+void testAcceptsZeroWidthObjectsUpToCap() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    BOOST_CHECK_NO_THROW(readBlockHeader(maxZeroWidthObjects, 0));
+}
+
+void testRejectsZeroWidthObjectsPastCap() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    BOOST_CHECK_THROW(readBlockHeader(maxZeroWidthObjects + 1, 0),
+                      avro::Exception);
+    BOOST_CHECK_THROW(readBlockHeader(int64_t(1) << 40, 0), avro::Exception);
+}
+
+// The cap is per file, not per block: two blocks under it can exceed it
+// together.
+void testRejectsZeroWidthObjectsPastCapAcrossBlocks() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    const int64_t half = maxZeroWidthObjects / 2 + 1;
+    const std::vector<uint8_t> ocf =
+        makeOcfWithBlockHeaders(emptyRecordSchema, {{half, 0}, {half, 0}});
+    avro::DataFileReaderBase reader(
+        avro::memoryInputStream(ocf.data(), ocf.size()));
+    reader.init();
+    auto readAll = [&reader]() {
+        while (reader.hasMore()) {
+            reader.decr();
+        }
+    };
+    BOOST_CHECK_THROW(readAll(), avro::Exception);
+}
+
+// A block re-read after seek() is counted once: reading a file at the cap
+// twice must not take it past the cap.
+void testRereadAfterSeekDoesNotCountTwice() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    const int64_t half = maxZeroWidthObjects / 2;
+    const std::vector<uint8_t> ocf =
+        makeOcfWithBlockHeaders(emptyRecordSchema, {{half, 0}, {half, 0}});
+    // seek() needs a seekable stream, which only files provide.
+    const char *filename = "zero_width_seek.df";
+    {
+        std::ofstream out(filename, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(ocf.data()), ocf.size());
+    }
+    avro::DataFileReaderBase reader(avro::fileSeekableInputStream(filename));
+    reader.init();
+    const int64_t firstBlock = reader.previousSync();
+    auto readAll = [&reader]() {
+        int64_t objects = 0;
+        while (reader.hasMore()) {
+            reader.decr();
+            ++objects;
+        }
+        return objects;
+    };
+    BOOST_CHECK_EQUAL(readAll(), maxZeroWidthObjects);
+    reader.seek(firstBlock);
+    BOOST_CHECK_EQUAL(readAll(), maxZeroWidthObjects);
+}
+
+// An empty record reused by name is still zero bytes wide, so the cap applies.
+void testCapsZeroWidthRecordReusedByName() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    const std::vector<uint8_t> ocf = makeOcfWithBlockHeaders(
+        "{\"type\":\"record\",\"name\":\"O\",\"fields\":["
+        "{\"name\":\"a\",\"type\":{\"type\":\"record\",\"name\":\"E\","
+        "\"fields\":[]}},"
+        "{\"name\":\"b\",\"type\":\"E\"}]}",
+        {{maxZeroWidthObjects + 1, 0}});
+    avro::DataFileReaderBase reader(
+        avro::memoryInputStream(ocf.data(), ocf.size()));
+    BOOST_CHECK_THROW(reader.init(), avro::Exception);
+}
+
+// A recursive schema whose recursion runs through a union writes a byte per
+// object, so it is not capped, and classifying it terminates.
+void testDoesNotCapRecursiveSchemaWithData() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    const std::vector<uint8_t> ocf = makeOcfWithBlockHeaders(
+        "{\"type\":\"record\",\"name\":\"R\",\"fields\":["
+        "{\"name\":\"next\",\"type\":[\"null\",\"R\"]}]}",
+        {{maxZeroWidthObjects + 1, 0}});
+    avro::DataFileReaderBase reader(
+        avro::memoryInputStream(ocf.data(), ocf.size()));
+    BOOST_CHECK_NO_THROW(reader.init());
+}
+
+// Objects that take at least a byte are bounded by the block's data, so the
+// cap does not apply to them.
+void testDoesNotCapObjectsWithData() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    const std::vector<uint8_t> ocf = makeOcfWithBlockHeaders(
+        "{\"type\":\"record\",\"name\":\"R\",\"fields\":["
+        "{\"name\":\"n\",\"type\":\"null\"},"
+        "{\"name\":\"i\",\"type\":\"int\"}]}",
+        {{maxZeroWidthObjects + 1, 0}});
+    avro::DataFileReaderBase reader(
+        avro::memoryInputStream(ocf.data(), ocf.size()));
+    BOOST_CHECK_NO_THROW(reader.init());
 }
 
 test_suite*
@@ -956,6 +1072,20 @@ init_unit_test_suite(int argc, char *argv[])
         add(BOOST_TEST_CASE(&testRejectsNegativeByteCount));
     boost::unit_test::framework::master_test_suite().
         add(BOOST_TEST_CASE(&testAcceptsMoreObjectsThanBytes));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testAcceptsZeroWidthObjectsUpToCap));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testRejectsZeroWidthObjectsPastCap));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testRejectsZeroWidthObjectsPastCapAcrossBlocks));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testRereadAfterSeekDoesNotCountTwice));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testCapsZeroWidthRecordReusedByName));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testDoesNotCapRecursiveSchemaWithData));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testDoesNotCapObjectsWithData));
     boost::unit_test::framework::master_test_suite().
         add(BOOST_TEST_CASE(&testSkipStringNullCodec));
     boost::unit_test::framework::master_test_suite().

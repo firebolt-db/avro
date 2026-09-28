@@ -19,7 +19,9 @@
 #include "DataFile.hh"
 #include "Compiler.hh"
 #include "Exception.hh"
+#include "NodeImpl.hh"
 
+#include <map>
 #include <sstream>
 
 #include <boost/random/mersenne_twister.hpp>
@@ -440,6 +442,45 @@ unique_ptr<InputStream> boundedInputStream(InputStream& in, size_t limit)
     return unique_ptr<InputStream>(new BoundedInputStream(in, limit));
 }
 
+// The most objects a file whose objects are all zero bytes wide may declare. Such an object
+// consumes no input, so a block header can declare any number of them in a few bytes and a
+// reader would spin for as long as the count lasts. Like apache-avro (Rust), which bounds such
+// a count by its allocation budget, cap it rather than trust the header.
+static const int64_t maxZeroWidthObjects = int64_t(1) << 24;
+
+// Whether every value of `node` encodes to zero bytes: null, a zero-size fixed, and records
+// made only of those, including records reused by name. Every other type writes at least a
+// length, tag or value byte. `seen` memoizes named types; a record is assumed zero-width
+// while its own fields are examined, so a schema that refers to itself terminates.
+static bool isZeroWidth(const NodePtr& node, std::map<const Node*, bool>& seen)
+{
+    switch (node->type()) {
+    case AVRO_NULL:
+        return true;
+    case AVRO_FIXED:
+        return node->fixedSize() == 0;
+    case AVRO_SYMBOLIC: {
+        const auto& symbolic = static_cast<const NodeSymbolic&>(*node);
+        return symbolic.isSet() && isZeroWidth(symbolic.getNode(), seen);
+    }
+    case AVRO_RECORD: {
+        const auto found = seen.find(node.get());
+        if (found != seen.end()) {
+            return found->second;
+        }
+        seen[node.get()] = true;
+        bool zeroWidth = true;
+        for (size_t i = 0; i < node->leaves() && zeroWidth; ++i) {
+            zeroWidth = isZeroWidth(node->leafAt(static_cast<int>(i)), seen);
+        }
+        seen[node.get()] = zeroWidth;
+        return zeroWidth;
+    }
+    default:
+        return false;
+    }
+}
+
 void DataFileReaderBase::readDataBlock()
 {
     decoder_->init(*stream_);
@@ -463,6 +504,15 @@ void DataFileReaderBase::readDataBlock()
         throw Exception(boost::format(
             "Invalid data block header: objectCount %1%, byteCount %2%")
             % objectCount_ % byteCount);
+    }
+    if (zeroWidthObjects_ && blockStart_ > zeroWidthCountedBlockStart_) {
+        if (objectCount_ > maxZeroWidthObjects - zeroWidthObjectCount_) {
+            throw Exception(boost::format(
+                "Invalid data block header: objectCount %1% takes the file past %2% "
+                "zero-byte objects") % objectCount_ % maxZeroWidthObjects);
+        }
+        zeroWidthObjectCount_ += objectCount_;
+        zeroWidthCountedBlockStart_ = blockStart_;
     }
     decoder_->init(*stream_);
     blockEnd_ = stream_->byteCount() + byteCount;
@@ -617,6 +667,8 @@ void DataFileReaderBase::readHeader()
     }
 
     dataSchema_ = makeSchema(it->second);
+    std::map<const Node*, bool> seen;
+    zeroWidthObjects_ = isZeroWidth(dataSchema_.root(), seen);
     if (! readerSchema_.root()) {
         readerSchema_ = dataSchema();
     }
