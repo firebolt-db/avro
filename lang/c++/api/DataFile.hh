@@ -191,9 +191,11 @@ class AVRO_DECL DataFileReaderBase : boost::noncopyable {
     const DecoderPtr decoder_;
     int64_t objectCount_;
     // True when the writer schema encodes every object in zero bytes; the objects such a
-    // file has declared so far, which readDataBlock() caps.
+    // file has declared so far, which readDataBlock() caps, and the start of the furthest
+    // block counted, so a block re-read after seek() or sync() is not counted again.
     bool zeroWidthObjects_ = false;
     int64_t zeroWidthObjectCount_ = 0;
+    int64_t zeroWidthCountedBlockStart_ = -1;
     bool eof_;
     Codec codec_;
     int64_t blockStart_;

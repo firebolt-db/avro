@@ -23,6 +23,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/shared_ptr.hpp>
 
+#include <fstream>
 #include <thread>
 #include <chrono>
 
@@ -872,6 +873,35 @@ void testRejectsZeroWidthObjectsPastCapAcrossBlocks() {
     BOOST_CHECK_THROW(readAll(), avro::Exception);
 }
 
+// A block re-read after seek() is counted once: reading a file at the cap
+// twice must not take it past the cap.
+void testRereadAfterSeekDoesNotCountTwice() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    const int64_t half = maxZeroWidthObjects / 2;
+    const std::vector<uint8_t> ocf =
+        makeOcfWithBlockHeaders(emptyRecordSchema, {{half, 0}, {half, 0}});
+    // seek() needs a seekable stream, which only files provide.
+    const char *filename = "zero_width_seek.df";
+    {
+        std::ofstream out(filename, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(ocf.data()), ocf.size());
+    }
+    avro::DataFileReaderBase reader(avro::fileSeekableInputStream(filename));
+    reader.init();
+    const int64_t firstBlock = reader.previousSync();
+    auto readAll = [&reader]() {
+        int64_t objects = 0;
+        while (reader.hasMore()) {
+            reader.decr();
+            ++objects;
+        }
+        return objects;
+    };
+    BOOST_CHECK_EQUAL(readAll(), maxZeroWidthObjects);
+    reader.seek(firstBlock);
+    BOOST_CHECK_EQUAL(readAll(), maxZeroWidthObjects);
+}
+
 // Objects that take at least a byte are bounded by the block's data, so the
 // cap does not apply to them.
 void testDoesNotCapObjectsWithData() {
@@ -1021,6 +1051,8 @@ init_unit_test_suite(int argc, char *argv[])
         add(BOOST_TEST_CASE(&testRejectsZeroWidthObjectsPastCap));
     boost::unit_test::framework::master_test_suite().
         add(BOOST_TEST_CASE(&testRejectsZeroWidthObjectsPastCapAcrossBlocks));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testRereadAfterSeekDoesNotCountTwice));
     boost::unit_test::framework::master_test_suite().
         add(BOOST_TEST_CASE(&testDoesNotCapObjectsWithData));
     boost::unit_test::framework::master_test_suite().

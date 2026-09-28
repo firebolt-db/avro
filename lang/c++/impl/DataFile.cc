@@ -492,13 +492,14 @@ void DataFileReaderBase::readDataBlock()
             "Invalid data block header: objectCount %1%, byteCount %2%")
             % objectCount_ % byteCount);
     }
-    if (zeroWidthObjects_) {
+    if (zeroWidthObjects_ && blockStart_ > zeroWidthCountedBlockStart_) {
         if (objectCount_ > maxZeroWidthObjects - zeroWidthObjectCount_) {
             throw Exception(boost::format(
                 "Invalid data block header: objectCount %1% takes the file past %2% "
                 "zero-byte objects") % objectCount_ % maxZeroWidthObjects);
         }
         zeroWidthObjectCount_ += objectCount_;
+        zeroWidthCountedBlockStart_ = blockStart_;
     }
     decoder_->init(*stream_);
     blockEnd_ = stream_->byteCount() + byteCount;
