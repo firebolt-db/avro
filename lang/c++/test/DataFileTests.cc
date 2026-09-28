@@ -902,6 +902,33 @@ void testRereadAfterSeekDoesNotCountTwice() {
     BOOST_CHECK_EQUAL(readAll(), maxZeroWidthObjects);
 }
 
+// An empty record reused by name is still zero bytes wide, so the cap applies.
+void testCapsZeroWidthRecordReusedByName() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    const std::vector<uint8_t> ocf = makeOcfWithBlockHeaders(
+        "{\"type\":\"record\",\"name\":\"O\",\"fields\":["
+        "{\"name\":\"a\",\"type\":{\"type\":\"record\",\"name\":\"E\","
+        "\"fields\":[]}},"
+        "{\"name\":\"b\",\"type\":\"E\"}]}",
+        {{maxZeroWidthObjects + 1, 0}});
+    avro::DataFileReaderBase reader(
+        avro::memoryInputStream(ocf.data(), ocf.size()));
+    BOOST_CHECK_THROW(reader.init(), avro::Exception);
+}
+
+// A recursive schema whose recursion runs through a union writes a byte per
+// object, so it is not capped, and classifying it terminates.
+void testDoesNotCapRecursiveSchemaWithData() {
+    BOOST_TEST_CHECKPOINT(__func__);
+    const std::vector<uint8_t> ocf = makeOcfWithBlockHeaders(
+        "{\"type\":\"record\",\"name\":\"R\",\"fields\":["
+        "{\"name\":\"next\",\"type\":[\"null\",\"R\"]}]}",
+        {{maxZeroWidthObjects + 1, 0}});
+    avro::DataFileReaderBase reader(
+        avro::memoryInputStream(ocf.data(), ocf.size()));
+    BOOST_CHECK_NO_THROW(reader.init());
+}
+
 // Objects that take at least a byte are bounded by the block's data, so the
 // cap does not apply to them.
 void testDoesNotCapObjectsWithData() {
@@ -1053,6 +1080,10 @@ init_unit_test_suite(int argc, char *argv[])
         add(BOOST_TEST_CASE(&testRejectsZeroWidthObjectsPastCapAcrossBlocks));
     boost::unit_test::framework::master_test_suite().
         add(BOOST_TEST_CASE(&testRereadAfterSeekDoesNotCountTwice));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testCapsZeroWidthRecordReusedByName));
+    boost::unit_test::framework::master_test_suite().
+        add(BOOST_TEST_CASE(&testDoesNotCapRecursiveSchemaWithData));
     boost::unit_test::framework::master_test_suite().
         add(BOOST_TEST_CASE(&testDoesNotCapObjectsWithData));
     boost::unit_test::framework::master_test_suite().
