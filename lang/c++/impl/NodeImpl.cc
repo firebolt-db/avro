@@ -19,6 +19,7 @@
 
 #include <sstream>
 #include <iomanip>
+#include <map>
 #include <boost/algorithm/string/replace.hpp>
 #include "NodeImpl.hh"
 
@@ -91,6 +92,43 @@ std::ostream& operator <<(std::ostream &os, indent x)
 }
 
 } // anonymous namespace
+
+// `seen` memoizes records; a record is assumed zero-width while its own fields are examined,
+// so a schema that refers to itself terminates.
+static bool isZeroWidth(const NodePtr& node, std::map<const Node*, bool>& seen)
+{
+    switch (node->type()) {
+    case AVRO_NULL:
+        return true;
+    case AVRO_FIXED:
+        return node->fixedSize() == 0;
+    case AVRO_SYMBOLIC: {
+        const auto& symbolic = static_cast<const NodeSymbolic&>(*node);
+        return symbolic.isSet() && isZeroWidth(symbolic.getNode(), seen);
+    }
+    case AVRO_RECORD: {
+        const auto found = seen.find(node.get());
+        if (found != seen.end()) {
+            return found->second;
+        }
+        seen[node.get()] = true;
+        bool zeroWidth = true;
+        for (size_t i = 0; i < node->leaves() && zeroWidth; ++i) {
+            zeroWidth = isZeroWidth(node->leafAt(static_cast<int>(i)), seen);
+        }
+        seen[node.get()] = zeroWidth;
+        return zeroWidth;
+    }
+    default:
+        return false;
+    }
+}
+
+bool isZeroWidth(const NodePtr& node)
+{
+    std::map<const Node*, bool> seen;
+    return isZeroWidth(node, seen);
+}
 
 const int kByteStringSize = 6;
 

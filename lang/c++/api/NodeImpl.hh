@@ -595,6 +595,12 @@ NodeImpl<A,B,C,D>::printBasicInfo(std::ostream &os) const
 }
 
 
+/// Whether every value of `node` encodes to zero bytes: null, a zero-size fixed, and records made
+/// only of those, including records reused by name. Every other type writes at least a length, tag
+/// or value byte. A value of such a type consumes no input, so a reader cannot rely on running out
+/// of input to bound how many it decodes.
+AVRO_DECL bool isZeroWidth(const NodePtr& node);
+
 inline NodePtr resolveSymbol(const NodePtr &node)
 {
     if(node->type() != AVRO_SYMBOLIC) {
