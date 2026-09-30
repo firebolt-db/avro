@@ -18,6 +18,8 @@
 
 #include "Compiler.hh"
 #include "GenericDatum.hh"
+#include "NodeImpl.hh"
+#include "Schema.hh"
 #include "ValidSchema.hh"
 
 #include <boost/test/included/unit_test_framework.hpp>
@@ -300,6 +302,46 @@ static void testRoundTrip(const char* schema)
     BOOST_CHECK(result2 == std::string(schema));
 }
 
+struct ZeroWidthCase {
+    const char* schema;
+    bool zeroWidth;
+};
+
+const ZeroWidthCase zeroWidthCases[] = {
+    { "\"null\"", true },
+    { "{\"type\":\"record\",\"name\":\"R\",\"fields\":[]}", true },
+    { "{\"type\":\"record\",\"name\":\"R\",\"fields\":[{\"name\":\"n\",\"type\":\"null\"},"
+        "{\"name\":\"e\",\"type\":{\"type\":\"record\",\"name\":\"E\",\"fields\":[]}}]}", true },
+    // A record reused by name is reached through a symbolic node.
+    { "{\"type\":\"record\",\"name\":\"R\",\"fields\":["
+        "{\"name\":\"a\",\"type\":{\"type\":\"record\",\"name\":\"E\",\"fields\":[]}},"
+        "{\"name\":\"b\",\"type\":\"E\"}]}", true },
+    // A record that contains itself terminates.
+    { "{\"type\":\"record\",\"name\":\"R\",\"fields\":[{\"name\":\"r\",\"type\":\"R\"}]}", true },
+    { "{\"type\":\"record\",\"name\":\"R\",\"fields\":[{\"name\":\"n\",\"type\":\"null\"},"
+        "{\"name\":\"i\",\"type\":\"int\"}]}", false },
+    // A union writes its branch index, even when every branch is null.
+    { "[\"null\"]", false },
+    { "{\"type\":\"array\",\"items\":\"null\"}", false },
+    { "{\"type\":\"map\",\"values\":\"null\"}", false },
+    { "{\"type\":\"fixed\",\"name\":\"F\",\"size\":1}", false },
+    { "{\"type\":\"enum\",\"name\":\"En\",\"symbols\":[\"A\"]}", false },
+    { "\"boolean\"", false },
+    { "\"string\"", false },
+};
+
+static void testIsZeroWidth(const ZeroWidthCase& c)
+{
+    BOOST_TEST_CHECKPOINT(c.schema);
+    BOOST_CHECK_EQUAL(isZeroWidth(compileJsonSchemaFromString(c.schema).root()), c.zeroWidth);
+}
+
+// The schema compiler rejects a zero-size fixed, but a schema built in code can hold one.
+static void testZeroSizeFixedIsZeroWidth()
+{
+    BOOST_CHECK(isZeroWidth(FixedSchema(0, "F").root()));
+}
+
 static void testCompactSchemas()
 {
   for (size_t i = 0; i < sizeof(schemasToCompact)/ sizeof(schemasToCompact[0]); i++)
@@ -478,5 +520,7 @@ init_unit_test_suite(int argc, char* argv[])
     ADD_PARAM_TEST(ts, avro::schema::testMalformedLogicalTypes,
                    avro::schema::malformedLogicalTypes);
     ts->add(BOOST_TEST_CASE(&avro::schema::testCompactSchemas));
+    ADD_PARAM_TEST(ts, avro::schema::testIsZeroWidth, avro::schema::zeroWidthCases);
+    ts->add(BOOST_TEST_CASE(&avro::schema::testZeroSizeFixedIsZeroWidth));
     return ts;
 }

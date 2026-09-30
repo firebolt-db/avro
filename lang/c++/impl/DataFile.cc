@@ -448,38 +448,6 @@ unique_ptr<InputStream> boundedInputStream(InputStream& in, size_t limit)
 // a count by its allocation budget, cap it rather than trust the header.
 static const int64_t maxZeroWidthObjects = int64_t(1) << 24;
 
-// Whether every value of `node` encodes to zero bytes: null, a zero-size fixed, and records
-// made only of those, including records reused by name. Every other type writes at least a
-// length, tag or value byte. `seen` memoizes named types; a record is assumed zero-width
-// while its own fields are examined, so a schema that refers to itself terminates.
-static bool isZeroWidth(const NodePtr& node, std::map<const Node*, bool>& seen)
-{
-    switch (node->type()) {
-    case AVRO_NULL:
-        return true;
-    case AVRO_FIXED:
-        return node->fixedSize() == 0;
-    case AVRO_SYMBOLIC: {
-        const auto& symbolic = static_cast<const NodeSymbolic&>(*node);
-        return symbolic.isSet() && isZeroWidth(symbolic.getNode(), seen);
-    }
-    case AVRO_RECORD: {
-        const auto found = seen.find(node.get());
-        if (found != seen.end()) {
-            return found->second;
-        }
-        seen[node.get()] = true;
-        bool zeroWidth = true;
-        for (size_t i = 0; i < node->leaves() && zeroWidth; ++i) {
-            zeroWidth = isZeroWidth(node->leafAt(static_cast<int>(i)), seen);
-        }
-        seen[node.get()] = zeroWidth;
-        return zeroWidth;
-    }
-    default:
-        return false;
-    }
-}
 
 void DataFileReaderBase::readDataBlock()
 {
@@ -667,8 +635,7 @@ void DataFileReaderBase::readHeader()
     }
 
     dataSchema_ = makeSchema(it->second);
-    std::map<const Node*, bool> seen;
-    zeroWidthObjects_ = isZeroWidth(dataSchema_.root(), seen);
+    zeroWidthObjects_ = isZeroWidth(dataSchema_.root());
     if (! readerSchema_.root()) {
         readerSchema_ = dataSchema();
     }
