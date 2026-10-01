@@ -76,6 +76,23 @@ void JsonParser::expectToken(Token tk)
     }
 }
 
+bool JsonParser::atEnd()
+{
+    if (hasNext && !isspace(static_cast<unsigned char>(nextChar))) {
+        return false;
+    }
+    hasNext = false;
+    while (in_.hasMore()) {
+        char ch = in_.read();
+        if (!isspace(static_cast<unsigned char>(ch))) {
+            nextChar = ch;
+            hasNext = true;
+            return false;
+        }
+    }
+    return true;
+}
+
 JsonParser::Token JsonParser::doAdvance()
 {
     char ch = next();
@@ -320,9 +337,49 @@ JsonParser::Token JsonParser::tryString()
             default:
                 throw unexpected(ch);
             }
+        } else if (static_cast<unsigned char>(ch) >= 0x80) {
+            readUtf8(ch);
         } else {
             sv.push_back(ch);
         }
+    }
+}
+
+// Appends the UTF-8 sequence that starts with `lead`, rejecting the byte sequences RFC 3629 does
+// not allow: stray continuation bytes, overlong forms, surrogates and code points past U+10FFFF.
+void JsonParser::readUtf8(unsigned char lead)
+{
+    int more;
+    unsigned char lo = 0x80;
+    unsigned char hi = 0xbf;
+    if (lead >= 0xc2 && lead <= 0xdf) {
+        more = 1;
+    } else if (lead >= 0xe0 && lead <= 0xef) {
+        more = 2;
+        if (lead == 0xe0) {
+            lo = 0xa0;
+        } else if (lead == 0xed) {
+            hi = 0x9f;
+        }
+    } else if (lead >= 0xf0 && lead <= 0xf4) {
+        more = 3;
+        if (lead == 0xf0) {
+            lo = 0x90;
+        } else if (lead == 0xf4) {
+            hi = 0x8f;
+        }
+    } else {
+        throw Exception("Invalid UTF-8 sequence");
+    }
+    sv.push_back(lead);
+    for (int i = 0; i < more; ++i) {
+        unsigned char c = in_.read();
+        if (c < lo || c > hi) {
+            throw Exception("Invalid UTF-8 sequence");
+        }
+        sv.push_back(c);
+        lo = 0x80;
+        hi = 0xbf;
     }
 }
 

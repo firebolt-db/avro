@@ -81,6 +81,7 @@ private:
     Token tryLiteral(const char exp[], size_t n, Token tk);
     Token tryNumber(char ch);
     Token tryString();
+    void readUtf8(unsigned char lead);
     Exception unexpected(unsigned char ch);
     char next();
 
@@ -117,6 +118,11 @@ public:
     }
 
     void expectToken(Token tk);
+
+    /**
+     * Returns true if and only if nothing but whitespace is left in the input.
+     */
+    bool atEnd();
 
     bool boolValue() const {
         return bv;

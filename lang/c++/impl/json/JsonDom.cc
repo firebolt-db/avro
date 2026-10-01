@@ -116,7 +116,11 @@ Entity loadEntity(InputStream& in)
 {
     JsonParser p;
     p.init(in);
-    return readEntity(p);
+    Entity e = readEntity(p);
+    if (!p.atEnd()) {
+        throw Exception("Unexpected content after the JSON value");
+    }
+    return e;
 }
 
 Entity loadEntity(const uint8_t* text, size_t len)
