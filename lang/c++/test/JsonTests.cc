@@ -24,6 +24,7 @@
 #include <boost/test/parameterized_test.hpp>
 
 #include "../impl/json/JsonDom.hh"
+#include "Exception.hh"
 
 #define S(x) #x
 
@@ -107,6 +108,15 @@ void testString(const TestData<const char*>& d)
     BOOST_CHECK_EQUAL(n.type(), d.type);
     BOOST_CHECK_EQUAL(n.stringValue(), d.value);
     BOOST_CHECK_EQUAL(n.toString(), d.output);
+}
+
+// A low surrogate that is not preceded by a high surrogate is not a valid code point and must be
+// rejected, including the last one (U+DFFF).
+static void testLoneLowSurrogate()
+{
+    BOOST_CHECK_THROW(loadEntity("\"\\udc00\"").stringValue(), Exception);
+    BOOST_CHECK_THROW(loadEntity("\"\\udffe\"").stringValue(), Exception);
+    BOOST_CHECK_THROW(loadEntity("\"\\udfff\"").stringValue(), Exception);
 }
 
 static void testNull()
@@ -221,6 +231,8 @@ init_unit_test_suite( int argc, char* argv[] )
     ts->add(BOOST_TEST_CASE(&avro::json::testObject0));
     ts->add(BOOST_TEST_CASE(&avro::json::testObject1));
     ts->add(BOOST_TEST_CASE(&avro::json::testObject2));
+
+    ts->add(BOOST_TEST_CASE(&avro::json::testLoneLowSurrogate));
 
     return ts;
 }
