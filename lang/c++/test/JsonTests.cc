@@ -24,6 +24,7 @@
 #include <boost/test/parameterized_test.hpp>
 
 #include "../impl/json/JsonDom.hh"
+#include "Exception.hh"
 
 #define S(x) #x
 
@@ -71,6 +72,31 @@ TestData<const char*> stringData[] = {
     { "\"\\/\"", etString, "/", "\"\\/\"" },
     { "\"\\u20ac\"", etString, "\xe2\x82\xac",  "\"\\u20ac\""},
     { "\"\\u03c0\"", etString, "\xcf\x80", "\"\\u03c0\"" },
+    { "\"\\Ud8ab\\udccd\"", etString, "\xf0\xba\xb3\x8d", "\"\\ud8ab\\udccd\"" },
+    { "\"\xcf\x80\"", etString, "\xcf\x80", "\"\\u03c0\"" },
+    { "\"\xe2\x82\xac\"", etString, "\xe2\x82\xac", "\"\\u20ac\"" },
+};
+
+const char* invalidData[] = {
+    // Content after the value
+    "{} {}",
+    "[1] x",
+    "\"a\" \"b\"",
+    "1 2",
+    "null,",
+    // Invalid raw UTF-8 bytes in a string: a stray continuation byte, a byte no sequence starts
+    // with, overlong forms, an encoded surrogate, a code point past U+10FFFF and a truncated run
+    "\"\x80\"",
+    "\"\xff\"",
+    "\"\xc0\xaf\"",
+    "\"\xe0\x80\xaf\"",
+    "\"\xed\xa0\x80\"",
+    "\"\xf4\x90\x80\x80\"",
+    "\"\xe2\x82\"",
+    // Unpaired high surrogate: alone, followed by a non-surrogate escape, or a non-escape char
+    "\"\\ud83d\"",
+    "\"\\ud83d\\u0041\"",
+    "\"\\ud83dx\"",
 };
 
 void testBool(const TestData<bool>& d)
@@ -106,6 +132,28 @@ void testString(const TestData<const char*>& d)
     BOOST_CHECK_EQUAL(n.type(), d.type);
     BOOST_CHECK_EQUAL(n.stringValue(), d.value);
     BOOST_CHECK_EQUAL(n.toString(), d.output);
+}
+
+// A low surrogate that is not preceded by a high surrogate is not a valid code point and must be
+// rejected, including the last one (U+DFFF).
+static void testLoneLowSurrogate()
+{
+    BOOST_CHECK_THROW(loadEntity("\"\\udc00\"").stringValue(), Exception);
+    BOOST_CHECK_THROW(loadEntity("\"\\udffe\"").stringValue(), Exception);
+    BOOST_CHECK_THROW(loadEntity("\"\\udfff\"").stringValue(), Exception);
+}
+
+void testInvalid(const char* input)
+{
+    BOOST_TEST_CHECKPOINT(input);
+    BOOST_CHECK_THROW(loadEntity(input).stringValue(), Exception);
+}
+
+static void testTrailingWhitespace()
+{
+    BOOST_CHECK_EQUAL(loadEntity("{} \n\t").type(), etObject);
+    BOOST_CHECK_EQUAL(loadEntity("1 ").longValue(), 1);
+    BOOST_CHECK_EQUAL(loadEntity("true\n").boolValue(), true);
 }
 
 static void testNull()
@@ -220,6 +268,12 @@ init_unit_test_suite( int argc, char* argv[] )
     ts->add(BOOST_TEST_CASE(&avro::json::testObject0));
     ts->add(BOOST_TEST_CASE(&avro::json::testObject1));
     ts->add(BOOST_TEST_CASE(&avro::json::testObject2));
+
+    ts->add(BOOST_TEST_CASE(&avro::json::testLoneLowSurrogate));
+    ts->add(BOOST_TEST_CASE(&avro::json::testTrailingWhitespace));
+    ts->add(BOOST_PARAM_TEST_CASE(&avro::json::testInvalid,
+        avro::json::invalidData,
+        avro::json::invalidData + COUNTOF(avro::json::invalidData)));
 
     return ts;
 }

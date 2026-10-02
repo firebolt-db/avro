@@ -1309,7 +1309,7 @@ static const TestData4 data4[] = {
             "\"type\":{\"type\":\"record\",\"name\":\"inner\",\"fields\":["
             "{\"name\":\"f1\", \"type\":\"int\", \"default\": 101},"
             "{\"name\":\"f2\", \"type\":\"int\"}]}}, "
-            "{\"name\": \"g2\", \"type\": \"long\"}]}}", "RRIIL",
+            "{\"name\": \"g2\", \"type\": \"long\"}]}", "RRIIL",
         { "10", "101", "11", NULL }, 1, 1 },
 
     // Default value for a record.

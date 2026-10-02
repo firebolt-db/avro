@@ -152,7 +152,15 @@ const char* basicSchemaErrors[] = {
     // default double - null
     "{ \"name\":\"test\", \"type\": \"record\", \"fields\": [ {\"name\": \"double\",\"type\": \"double\",\"default\" : null }]}",
     // default double - string
-    "{ \"name\":\"test\", \"type\": \"record\", \"fields\": [ {\"name\": \"double\",\"type\": \"double\",\"default\" : \"string\" }]}"
+    "{ \"name\":\"test\", \"type\": \"record\", \"fields\": [ {\"name\": \"double\",\"type\": \"double\",\"default\" : \"string\" }]}",
+
+    // Content after the schema
+    "\"int\" \"long\"",
+    "{\"type\":\"record\",\"name\":\"R\",\"fields\":[]}}",
+    "{\"type\":\"record\",\"name\":\"R\",\"fields\":[]}\"x\"",
+    // Invalid UTF-8 in a string
+    "{\"type\":\"record\",\"name\":\"R\",\"doc\":\"\xff\",\"fields\":[]}",
+    "{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"\\ud800\"]}"
 
 };
 
